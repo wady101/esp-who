@@ -70,13 +70,6 @@ static size_t jpg_encode_stream(void *arg, size_t index, const void *data, size_
 }
 
 /* MQTT init code starts here */
-// Access IoTHub via MQTTT Protocol with mosquitto library (no IoT SDK used)
-//
-
-#include <cstdio>
-#include <fstream>
-#include "mosquitto.h"
-
 // CONNECTION information to complete
 #define IOTHUBNAME "<your IoT Hub name>"
 #define DEVICEID "<your device Id>"
@@ -91,45 +84,75 @@ static size_t jpg_encode_stream(void *arg, size_t index, const void *data, size_
 #define HOST IOTHUBNAME ".azure-devices.net"
 #define TOPIC "devices/" DEVICEID "/messages/events/"
 
-// Note
-// Certificate
-//  Server certs available here for download: https://raw.githubusercontent.com/Azure/azure-iot-sdk-c/master/certs/certs.c
-// 
-// PWD
-//  Generated via Azure CLI, Device explorer or VSCode Azure IoT extension (Generate SAS Token for device)
-//  az iot hub generate-sas-token -d EM_MXC3166 -n EricmittHub
-// 
-// Username
-//  Username format for MQTT connection to Hub: $hub_hostname/$device_id/?api-version=2018-06-30"
-
-// Callback functions
-void connect_callback(struct mosquitto* mosq, void* obj, int result)
+/*
+ * @brief Event handler registered to receive MQTT events
+ *
+ *  This function is called by the MQTT client event loop.
+ *
+ * @param handler_args user data registered to the event.
+ * @param base Event base for the handler(always MQTT Base in this example).
+ * @param event_id The id for the received event.
+ * @param event_data The data for the event, esp_mqtt_event_handle_t.
+ */
+static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data)
 {
-	printf("Connect callback returned result: %s\r\n", mosquitto_strerror(result));
+    ESP_LOGD(TAG, "Event dispatched from event loop base=%s, event_id=%d", base, event_id);
+    esp_mqtt_event_handle_t event = event_data;
+    esp_mqtt_client_handle_t client = event->client;
+    int msg_id;
+    switch ((esp_mqtt_event_id_t)event_id) {
+    case MQTT_EVENT_CONNECTED:
+        ESP_LOGI(TAG, "MQTT_EVENT_CONNECTED");
+        msg_id = esp_mqtt_client_subscribe(client, "/topic/qos0", 0);
+        ESP_LOGI(TAG, "sent subscribe successful, msg_id=%d", msg_id);
 
-	if (result == MOSQ_ERR_CONN_REFUSED)
-		printf("Connection refused. Please check DeviceId, IoTHub name or if your SAS Token has expired.\r\n");
+        msg_id = esp_mqtt_client_subscribe(client, "/topic/qos1", 1);
+        ESP_LOGI(TAG, "sent subscribe successful, msg_id=%d", msg_id);
+
+        msg_id = esp_mqtt_client_unsubscribe(client, "/topic/qos1");
+        ESP_LOGI(TAG, "sent unsubscribe successful, msg_id=%d", msg_id);
+        break;
+    case MQTT_EVENT_DISCONNECTED:
+        ESP_LOGI(TAG, "MQTT_EVENT_DISCONNECTED");
+        break;
+
+    case MQTT_EVENT_SUBSCRIBED:
+        ESP_LOGI(TAG, "MQTT_EVENT_SUBSCRIBED, msg_id=%d", event->msg_id);
+        msg_id = esp_mqtt_client_publish(client, "/topic/qos0", "data", 0, 0, 0);
+        ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
+        break;
+    case MQTT_EVENT_UNSUBSCRIBED:
+        ESP_LOGI(TAG, "MQTT_EVENT_UNSUBSCRIBED, msg_id=%d", event->msg_id);
+        break;
+    case MQTT_EVENT_PUBLISHED:
+        ESP_LOGI(TAG, "MQTT_EVENT_PUBLISHED, msg_id=%d", event->msg_id);
+        break;
+    case MQTT_EVENT_DATA:
+        ESP_LOGI(TAG, "MQTT_EVENT_DATA");
+        printf("TOPIC=%.*s\r\n", event->topic_len, event->topic);
+        printf("DATA=%.*s\r\n", event->data_len, event->data);
+        if (strncmp(event->data, "send binary please", event->data_len) == 0) {
+            ESP_LOGI(TAG, "Sending the binary");
+        }
+        break;
+    case MQTT_EVENT_ERROR:
+        ESP_LOGI(TAG, "MQTT_EVENT_ERROR");
+        if (event->error_handle->error_type == MQTT_ERROR_TYPE_TCP_TRANSPORT) {
+            ESP_LOGI(TAG, "Last error code reported from esp-tls: 0x%x", event->error_handle->esp_tls_last_esp_err);
+            ESP_LOGI(TAG, "Last tls stack error number: 0x%x", event->error_handle->esp_tls_stack_err);
+            ESP_LOGI(TAG, "Last captured errno : %d (%s)",  event->error_handle->esp_transport_sock_errno,
+                     strerror(event->error_handle->esp_transport_sock_errno));
+        } else if (event->error_handle->error_type == MQTT_ERROR_TYPE_CONNECTION_REFUSED) {
+            ESP_LOGI(TAG, "Connection refused error: 0x%x", event->error_handle->connect_return_code);
+        } else {
+            ESP_LOGW(TAG, "Unknown error type: 0x%x", event->error_handle->error_type);
+        }
+        break;
+    default:
+        ESP_LOGI(TAG, "Other event id:%d", event->event_id);
+        break;
+    }
 }
-
-void publish_callback(struct mosquitto* mosq, void* userdata, int mid)
-{
-	printf("Publish OK. Now disconnecting the client.\r\n");
-	mosquitto_disconnect(mosq);
-}
-
-int mosquitto_error(int rc, const char* message = NULL)
-{
-	printf("Error: %s\r\n", mosquitto_strerror(rc));
-
-	if (message != NULL)
-	{
-		printf("%s\r\n", message);
-	}
-
-	mosquitto_lib_cleanup();
-	return rc;
-}
-
 /* MQTT init code ends here */
 static esp_err_t capture_handler(void)
 {
@@ -146,53 +169,8 @@ static esp_err_t capture_handler(void)
         int rc;
       	printf("Using MQTT to send message to %s.\r\n", HOST);
       
-      	// init the mosquitto lib
-      	mosquitto_lib_init();
-      
-      	// create the mosquito object
-      	struct mosquitto* mosq = mosquitto_new(DEVICEID, false, NULL);
-      
-      	// add callback functions
-      	mosquitto_connect_callback_set(mosq, connect_callback);
-      	mosquitto_publish_callback_set(mosq, publish_callback);
-      
-      	// set mosquitto username, password and options
-      	mosquitto_username_pw_set(mosq, USERNAME, PWD);
-      
-      	// specify the certificate to use
-      	std::ifstream infile(CERTIFICATEFILE);
-      	bool certExists = infile.good();
-      	infile.close();
-      	if (!certExists)
-      	{
-      		printf("Warning: Could not find file '%s'! The mosquitto loop may fail.\r\n", CERTIFICATEFILE);
-      	}
-      
-      	printf("Using certificate: %s\r\n", CERTIFICATEFILE);
-      	mosquitto_tls_set(mosq, CERTIFICATEFILE, NULL, NULL, NULL, NULL);
-      
       	// specify the mqtt version to use
-      	int* option = new int(MQTT_PROTOCOL_V311);
-      	rc = mosquitto_opts_set(mosq, MOSQ_OPT_PROTOCOL_VERSION, option);
-      	if (rc != MOSQ_ERR_SUCCESS)
-      	{
-      		return mosquitto_error(rc, "Error: opts_set protocol version");
-      	}
-      	else
-      	{
-      		printf("Setting up options OK\r\n");
-      	}
-      
-      	// connect
-      	printf("Connecting...\r\n");
-      	rc = mosquitto_connect(mosq, HOST, PORT, 10);
-      	if (rc != MOSQ_ERR_SUCCESS)
-      	{
-      		return mosquitto_error(rc);
-      	}
-      
-      	printf("Connect returned OK\r\n");
-      
+      	
       	int msgId = 42;
       
       	/////// MQTT code ends here 
@@ -200,22 +178,16 @@ static esp_err_t capture_handler(void)
         // size_t fb_len = 0;
         if (frame->format == PIXFORMAT_JPEG)
         {
-            // once connected, we can publish (send) a Telemetry message
-      	    printf("Publishing....\r\n");
-      	    rc = mosquitto_publish(mosq, &msgId, TOPIC, frame->len,(const char *)frame->buf , 1, true);
-      	    if (rc != MOSQ_ERR_SUCCESS)
-      	    {
-      	    	return mosquitto_error(rc);
-      	    }
-      
-      	    printf("Publish returned OK\r\n");
-      
-      	    // according to the mosquitto doc, a call to loop is needed when dealing with network operation
-      	    // see https://github.com/eclipse/mosquitto/blob/master/lib/mosquitto.h
-      	    printf("Entering Mosquitto Loop...\r\n");
-      	    mosquitto_loop_forever(mosq, -1, 1);
-      
-      	    mosquitto_lib_cleanup();
+            const esp_mqtt_client_config_t mqtt_cfg = {
+              .uri = CONFIG_BROKER_URI,
+              .cert_pem = (const char *)mqtt_eclipseprojects_io_pem_start,
+            };
+        
+            ESP_LOGI(TAG, "[APP] Free memory: %d bytes", esp_get_free_heap_size());
+            esp_mqtt_client_handle_t client = esp_mqtt_client_init(&mqtt_cfg);
+            /* The last argument may be used to pass data to the event handler, in this example mqtt_event_handler*/
+            esp_mqtt_client_register_event(client, ESP_EVENT_ANY_ID, mqtt_event_handler, NULL);
+            esp_mqtt_client_start(client);
         }
         else
         {

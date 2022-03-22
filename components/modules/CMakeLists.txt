@@ -24,6 +24,7 @@ set(include_dirs
                     imu)
 
 set(requires    esp32-camera
+                mqtt
                 esp-dl
                 bus
                 screen
